@@ -4,13 +4,16 @@
 
 > 本项目由 **豆包（Doubao）、DeepSeek、腾讯混元、通义千问** 共同完成：豆包负责整体架构、后端、QML 界面与整合交付；DeepSeek 负责代码审查、地理编码与 AQI 补丁、稳定性修复；腾讯混元参与交互流程与产品化建议；通义千问负责液态玻璃视觉规范与界面文案。
 
-## 怎么下载（普通用户看这里）
+## 怎么下载
 
-- **想直接用程序**：进入仓库右侧的 **Releases** → 点最新版本 → 下载 `天气_安装程序.exe`，双击安装即可（Windows 10/11 x64，无需装 Python）。
-- **想自己编译**：点页面右侧绿色的 **`< > Code`** 按钮 → **Download ZIP**，下载后解压，再把仓库根目录的 `assets.zip` 解压到同一层（`Expand-Archive .\assets.zip -DestinationPath . -Force`），然后按下面「开发运行」操作。
-- **只想要图标/背景资源**：直接点仓库里那个 **`assets.zip`** 文件 → 页面右上 **Download** 按钮。
+仓库不提供现成安装包（约 120 MB，未随仓库发布），可下载的是**源码 + 资源包**：
 
-> 若 Releases 里没有安装包（可能还没发布），就先用第二种方式：下载 ZIP 后解压 `assets.zip`，用 Python 跑 `src/weather_app/main.py`。
+1. 点页面右上绿色的 **`< > Code`** 按钮 → 弹出菜单里点 **Download ZIP**（下的是全部源码）；
+2. 回到仓库根目录，点 **`assets.zip`** → 页面右上 **Download**（下的是图标与背景图，约 6 MB）；
+3. 两个包解压到同一个文件夹：`Expand-Archive .\assets.zip -DestinationPath . -Force`，就会得到 `assets/` 目录，目录结构与 `天气.spec` 一致。
+4. 再看下面「开发运行」三条命令，用 Python 启动 `src/weather_app/main.py`。
+
+> 想直接双击安装而不用 Python：需要本地打包或在 Releases 页下载（若后续上传）；也可用 `天气.spec` 自行 PyInstaller 打包。
 
 ## 功能
 
@@ -110,7 +113,7 @@ assets/
 
 ## 资源文件（assets.zip）
 
-图标、程序图标与背景图是二进制文件，以 `assets.zip`（约 6 MB）随仓库提供。下载后解压到仓库根目录，即可得到 `assets/` 目录：
+图标、程序图标与背景图是二进制文件，以 `assets.zip`（约 6 MB）随仓库提供。下载后解压到仓库根目录：
 
 ```powershell
 Expand-Archive .\assets.zip -DestinationPath . -Force
