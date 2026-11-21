@@ -4,6 +4,14 @@
 
 > 本项目由 **豆包（Doubao）、DeepSeek、腾讯混元、通义千问** 共同完成：豆包负责整体架构、后端、QML 界面与整合交付；DeepSeek 负责代码审查、地理编码与 AQI 补丁、稳定性修复；腾讯混元参与交互流程与产品化建议；通义千问负责液态玻璃视觉规范与界面文案。
 
+## 怎么下载（普通用户看这里）
+
+- **想直接用程序**：进入仓库右侧的 **Releases** → 点最新版本 → 下载 `天气_安装程序.exe`，双击安装即可（Windows 10/11 x64，无需装 Python）。
+- **想自己编译**：点页面右侧绿色的 **`< > Code`** 按钮 → **Download ZIP**，下载后解压，再把仓库根目录的 `assets.zip` 解压到同一层（`Expand-Archive .\assets.zip -DestinationPath . -Force`），然后按下面「开发运行」操作。
+- **只想要图标/背景资源**：直接点仓库里那个 **`assets.zip`** 文件 → 页面右上 **Download** 按钮。
+
+> 若 Releases 里没有安装包（可能还没发布），就先用第二种方式：下载 ZIP 后解压 `assets.zip`，用 Python 跑 `src/weather_app/main.py`。
+
 ## 功能
 
 - **多源加权**：Open-Meteo、中国天气网、GFS、ECMWF、wttr.in、和风天气（可选）并行取数，缺失源自动归一化，偏离均值过大的源自动剔除
