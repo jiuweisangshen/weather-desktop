@@ -100,6 +100,16 @@ assets/
 └── ui/                极光渐变背景
 ```
 
+## 资源文件（assets.zip）
+
+图标、程序图标与背景图是二进制文件，以 `assets.zip`（约 6 MB）随仓库提供。下载后解压到仓库根目录，即可得到 `assets/` 目录：
+
+```powershell
+Expand-Archive .\assets.zip -DestinationPath . -Force
+```
+
+解压后目录为 `assets/icons/png`、`assets/icons/svg`、`assets/appicon`、`assets/ui`，与 `天气.spec` 里的 datas 路径一致，可直接打包。
+
 ## 免责声明
 
 本程序仅聚合第三方公开天气数据，展示的「综合温度」为多源加权参考值，不构成任何专业气象结论；数据版权归各数据源所有。
