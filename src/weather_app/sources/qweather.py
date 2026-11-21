@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""和风天气 QWeather（可选）：需在 config.json 填入免费 Key
+"""和风天气 QWeather（可选）：需在 F:\\weather\\config.json 填入免费 Key
 文档：https://dev.qweather.com/docs/api/"""
 from .base import http_get
 
@@ -7,7 +7,8 @@ _GEO = "https://geoapi.qweather.com/v2/city/lookup"
 _NOW = "https://devapi.qweather.com/v7/weather/now"
 _DAILY = "https://devapi.qweather.com/v7/weather/7d"
 
-# 天气文本关键词 → 图标键（按《地面气象观测规范》用语维护）
+# 天气文本关键词 → 图标键（关键词按《地面气象观测规范》用语维护，
+# 不使用「毛毛雨」等非规范表述；和风实际下发文本为 晴/多云/阴/小雨/中雨/大雨/阵雨 等）
 _ICON_RULES = [
     ("冰雹", "thunder_hail"), ("雷", "thunder"), ("暴雪", "heavy_snow"),
     ("大雪", "heavy_snow"), ("中雪", "snow"), ("阵雪", "snow_showers"),
