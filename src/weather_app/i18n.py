@@ -3,11 +3,11 @@
 
 设计要点：
 - 源语言固定为简体中文：代码里写的是原文，词典只维护 zh-TW 与 en 两份译文。
-- QML 通过根组件的 tr() 调用本模块；语言切换后由 Python 重建 QML 引擎，
+- QML 通过上下文属性 ``tr`` 调用本模块的 :func:`tr`；语言切换后由 Python 重建 QML 引擎，
   因此不需要 Qt 的 retranslate 机制，也没有 .qm 编译步骤。
 - 后端数据（天气描述、AQI/UV 等级、风向、预警级别与类型、数据源名、状态提示）
-  在交给 QML 之前用 localize() 递归翻译；标识类字段（code/id/icon/unit…）跳过。
-- 含动态数字的长句统一走 tr + str.format，词典里用 {spread} 这类占位符作键。
+  在交给 QML 之前用 :func:`localize` 递归翻译；标识类字段（code/id/icon/unit…）跳过。
+- 含动态数字的长句统一走 :func:`tr` + ``str.format``，词典里用 ``{spread}`` 这类占位符作键。
 """
 import json
 import os

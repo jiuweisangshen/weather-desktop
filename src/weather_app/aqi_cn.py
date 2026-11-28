@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """中国环境空气质量指数 AQI（HJ 633-2012）计算补丁。
 
-用途：Open-Meteo 的 `us_aqi` 与 `pm2_5` 偶发不自洽，且界面使用中国 AQI 的
-中文分级文案。本模块用 PM2.5 / PM10 小时浓度计算 IAQI，取最大值作为 AQI。
+用途：Open-Meteo 的 `us_aqi` 与 `pm2_5` 偶发不自洽，且现有 UI 使用的是
+中国 AQI 的中文分级文案。本模块用 PM2.5 / PM10 小时浓度计算 IAQI，
+取最大值作为 AQI，口径与中文分级一致。
 
 说明：HJ 633-2012 正式评价使用 24h 平均浓度；天气 App 用当前小时浓度
-计算属于「参考值」，界面会标注口径。
+计算属于“参考值”，应在界面标注。若需要严格 24h，可传入 24h 均值。
 """
 from __future__ import annotations
 
@@ -81,3 +82,14 @@ def us_aqi_from_pm25(pm25: float | None):
         if c <= hi:
             return int(round(ilo + (ihi - ilo) * (c - lo) / (hi - lo)))
     return 500
+
+
+if __name__ == "__main__":
+    for name, pm25, pm10, api_us in [
+        ("北京", 301.7, 320.4, 255),
+        ("上海", 11.7, 13.3, 52),
+        ("伦敦", 3.5, 5.8, 25),
+    ]:
+        cn, primary = china_aqi(pm25, pm10)
+        print(f"{name}: CN AQI={cn} ({aqi_info(cn)['label']}), 首要={primary}, "
+              f"PM2.5 对应的 US AQI≈{us_aqi_from_pm25(pm25)}, API us_aqi={api_us}")

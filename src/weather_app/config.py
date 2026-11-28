@@ -91,7 +91,7 @@ def base_dir() -> str:
 
 
 def resource_dir() -> str:
-    """内置资源根目录：打包后为 PyInstaller 解包目录；开发时为仓库根"""
+    """内置资源根目录：打包后为 PyInstaller 解包目录；开发时为 F:\\weather"""
     if is_frozen():
         return getattr(sys, "_MEIPASS", base_dir())
     return base_dir()

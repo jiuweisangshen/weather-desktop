@@ -14,6 +14,10 @@ from .cache import Cache
 
 AUTO_REFRESH_MS = 10 * 60 * 1000  # 每 10 分钟自动刷新
 
+# 数据获取失败后的自动重试时刻（秒，相对"首次失败"那一刻计算，不是累加间隔）
+# 三次都失败就放弃，等下一次自动刷新（refresh_minutes）
+RETRY_DELAYS_S = (5.0, 15.0, 20.0)
+
 
 class Backend(QObject):
     """QML 侧可调用的后端桥：请求数据 / 自动刷新 / 打开链接"""
@@ -21,6 +25,9 @@ class Backend(QObject):
     dataLoaded = Signal(dict)
     errorOccurred = Signal(str)
     languageChanged = Signal(str)
+    # 内部信号：QTimer 只能在主线程起停，取数线程里的失败要先交回主线程
+    _retryNeeded = Signal(int, str)     # (seq, 错误文案) —— 请求安排下一次重试
+    _attemptDone = Signal(int)          # (seq) —— 一次取数尝试结束
 
     def __init__(self, cfg: dict):
         super().__init__()
@@ -38,6 +45,16 @@ class Backend(QObject):
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
         self._watchdog.timeout.connect(self._on_watchdog)
+
+        # 失败自动重试：5s / 15s / 20s（相对首次失败时刻），用完就等自动刷新
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._on_retry_timer)
+        self._retry_query = None
+        self._retry_idx = 0          # 下一次要用 RETRY_DELAYS_S 的第几档；>=3 表示用完
+        self._retry_start = 0.0      # 首次失败的时刻（time.monotonic）
+        self._retryNeeded.connect(self._on_retry_needed)
+        self._attemptDone.connect(self._on_attempt_done)
 
     def _on_watchdog(self):
         if not self._busy:
@@ -92,6 +109,10 @@ class Backend(QObject):
         self._seq += 1
         seq = self._seq
         self._busy = True
+        self._retry_timer.stop()          # 新一轮请求：清掉上一轮还没执行的重试
+        self._retry_idx = 0
+        self._retry_start = 0.0
+        self._retry_query = query or None
         self.loadingChanged.emit(True)
         try:
             timeout_sec = float(self._cfg.get("timeout_sec", 20) or 20)
@@ -108,23 +129,76 @@ class Backend(QObject):
             if age > 6 * 3600:
                 hit = None
         if hit:
-            self.dataLoaded.emit(i18n.localize(hit))
+            # 缓存译文放到后台线程：主线程不再为几百条文案做递归翻译，
+            # 避免"启动瞬间窗口卡一下"（缓存命中也几乎无感，只是晚几毫秒上屏）。
+            def _prewarm():
+                try:
+                    payload = i18n.localize(hit)
+                    if seq == self._seq:
+                        self.dataLoaded.emit(payload)
+                except Exception:  # noqa: BLE001
+                    pass
 
-        def work():
-            try:
-                payload = fetch.fetch_weather(query or None, self._cfg, use_cache=False)
-                if seq == self._seq:
-                    self.dataLoaded.emit(i18n.localize(payload))
-            except Exception as e:  # noqa: BLE001
-                if seq == self._seq:
-                    self.errorOccurred.emit(i18n.tr(str(e)))
-            finally:
-                if seq == self._seq:
-                    self._busy = False
-                    self._watchdog.stop()
-                    self.loadingChanged.emit(False)
+            threading.Thread(target=_prewarm, daemon=True).start()
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=self._work, args=(seq, query or None, False), daemon=True).start()
+
+    # ---------- 取数 + 失败重试 ----------
+    def _work(self, seq: int, query, is_retry: bool):
+        """取数线程：成功就上屏，失败交回主线程按 5s/15s/20s 重试。"""
+        try:
+            payload = fetch.fetch_weather(query, self._cfg, use_cache=False)
+            if seq != self._seq:
+                return
+            self._retry_idx = 0
+            self._retry_start = 0.0
+            self.dataLoaded.emit(i18n.localize(payload))
+            self._attemptDone.emit(seq)
+            if not is_retry:
+                self._busy = False
+                self.loadingChanged.emit(False)
+        except Exception as e:  # noqa: BLE001
+            if seq != self._seq:
+                return
+            self._retryNeeded.emit(seq, str(e))
+
+    def _on_attempt_done(self, seq: int):
+        """主线程收尾：停看门狗（QTimer 不能在工作线程里 stop）。"""
+        self._watchdog.stop()
+
+    def _on_retry_needed(self, seq: int, msg: str):
+        """数据获取失败 → 按 5s / 15s / 20s 再试；三次用完才报错并等自动刷新。"""
+        if seq != self._seq:
+            return
+        self._watchdog.stop()  # 等待重试期间不占用看门狗，重试真正开始时再起
+        if self._retry_start <= 0.0:
+            self._retry_start = time.monotonic()
+        if self._retry_idx >= len(RETRY_DELAYS_S):
+            # 三次重试都失败：结束加载态、报一次错，然后只等 refresh_minutes 后的自动刷新
+            self._retry_idx = 0
+            self._retry_start = 0.0
+            self._busy = False
+            self.loadingChanged.emit(False)
+            self.errorOccurred.emit(
+                i18n.tr(msg) + " · " + i18n.tr("已自动重试 3 次仍失败，将在下次自动刷新时重试")
+            )
+            return
+        target = self._retry_start + RETRY_DELAYS_S[self._retry_idx]
+        self._retry_idx += 1
+        remain = target - time.monotonic()
+        self._retry_timer.start(max(150, int(remain * 1000)))
+
+    def _on_retry_timer(self):
+        """到点：起一次后台重试（不打扰界面，成功就用 dataLoaded 直接上屏）。"""
+        if self._retry_idx <= 0:
+            return
+        try:
+            timeout_sec = float(self._cfg.get("timeout_sec", 20) or 20)
+        except (TypeError, ValueError):
+            timeout_sec = 20.0
+        timeout_sec = max(5.0, min(60.0, timeout_sec))
+        self._watchdog.start(int((timeout_sec + 35) * 1000))
+        threading.Thread(target=self._work, args=(self._seq, self._retry_query, True), daemon=True).start()
 
     @Slot(str, result=str)
     def suggest(self, text: str):

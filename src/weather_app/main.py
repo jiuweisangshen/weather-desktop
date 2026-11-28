@@ -6,6 +6,16 @@
 import json
 import os
 import sys
+import time
+
+_PROF_T0 = time.perf_counter()
+
+
+def _prof(tag: str) -> None:
+    """启动/运行性能打点：仅在 WEATHER_PROFILE=1 时输出，正常使用零开销。"""
+    if os.environ.get("WEATHER_PROFILE"):
+        print("[prof] %-16s %7.0f ms" % (tag, (time.perf_counter() - _PROF_T0) * 1000), flush=True)
+
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _src = os.path.dirname(_here)
@@ -262,11 +272,67 @@ def _build_ui(backend, cfg: dict):
     ctx.setContextProperty("initialMouseFollow", bool(cfg.get("mouse_follow", True)))
     ctx.setContextProperty(
         "initialGlassLayout", json.dumps(cfg.get("glass_layout") or {}, ensure_ascii=False))
+    # 玻璃背景纹理缩放：1.0 = 全分辨率（最清晰、最费），0.6 = 更省 GPU
+    try:
+        ctx.setContextProperty("perfTexScale",
+                               float(os.environ.get("WEATHER_GLASS_SCALE") or 0.75))
+    except (TypeError, ValueError):
+        ctx.setContextProperty("perfTexScale", 0.75)
+    ctx.setContextProperty("perfGlassLive",
+                           os.environ.get("WEATHER_GLASS_LIVE", "1") != "0")
 
     ui = os.path.join(config.ui_dir(), "main.qml")
     engine.load(QUrl.fromLocalFile(ui))
     roots = engine.rootObjects()
     return engine, (roots[0] if roots else None)
+
+
+def _install_diag(backend, win) -> None:
+    """WEATHER_PROFILE=1 时的运行诊断：帧率、UI 事件循环卡顿、首屏数据耗时。"""
+    frames = {"n": 0, "stall": 0, "maxgap": 0.0}
+
+    def _on_frame():
+        frames["n"] += 1
+
+    try:
+        win.frameSwapped.connect(_on_frame)
+    except Exception:  # noqa: BLE001
+        pass
+
+    state = {"last": time.perf_counter()}
+
+    def _tick():
+        now = time.perf_counter()
+        gap = (now - state["last"]) * 1000.0
+        state["last"] = now
+        if gap > 300:
+            frames["stall"] += 1
+            frames["maxgap"] = max(frames["maxgap"], gap)
+            print("[prof] UI stall %6.0f ms" % gap, flush=True)
+
+    timer = QTimer(win)
+    timer.setInterval(100)
+    timer.timeout.connect(_tick)
+    timer.start()
+
+    def _report():
+        props = []
+        for k in ("loading", "glassLive", "hasData", "solarElev", "theme"):
+            try:
+                props.append("%s=%s" % (k, win.property(k)))
+            except Exception:  # noqa: BLE001
+                pass
+        print("[prof] frames/2s=%d  stalls=%d  maxgap=%.0fms  | %s"
+              % (frames["n"], frames["stall"], frames["maxgap"], " ".join(props)), flush=True)
+        frames["n"] = 0
+
+    for _i in range(1, 6):
+        QTimer.singleShot(_i * 2000, _report)
+
+    try:
+        backend.dataLoaded.connect(lambda _d: _prof("first-data"))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _install_language_switch(backend, holder: dict, icon_path: str) -> None:
@@ -309,6 +375,7 @@ def _install_language_switch(backend, holder: dict, icon_path: str) -> None:
 
 
 def main() -> int:
+    _prof("main-enter")
     out, city = _args()
 
     # 控制台日志统一 UTF-8：否则 Windows 默认代码页会把中文报告打成乱码
@@ -329,12 +396,15 @@ def main() -> int:
     app = QGuiApplication(sys.argv)
     app.setApplicationName(config.APP_NAME)
     app.setApplicationDisplayName(config.APP_TITLE)
+    _prof("qapp")
     _ensure_fonts(app)
+    _prof("fonts")
 
     # 单实例：已有窗口在跑就唤起它并立刻退出（连点多次不会开出一堆窗口）
     single_name = _single_instance_name()
     if not out and _raise_existing_instance(single_name):
         return 0
+    _prof("single-check")
 
     icon_path = os.path.join(config.assets_dir(), "appicon", "app_icon.ico")
     if os.path.exists(icon_path):
@@ -346,13 +416,30 @@ def main() -> int:
     # 多语言：先按配置装词典，标题与界面文案都依赖当前语言
     i18n.load()
     i18n.set_language(cfg.get("language"))
+    _prof("config+i18n")
 
     backend = Backend(cfg)
+    _prof("backend")
     engine, win = _build_ui(backend, cfg)
+    _prof("qml-load")
     if win is None:
         return 1
     if os.path.exists(icon_path):
         win.icon = QIcon(icon_path)
+
+    # 真实窗口抓图（验证 GPU 玻璃效果用；离屏平台没有 RHI，抓不到玻璃）
+    grab_real = None
+    if "--grab-real" in sys.argv:
+        j = sys.argv.index("--grab-real")
+        if j + 1 < len(sys.argv):
+            grab_real = sys.argv[j + 1]
+    if grab_real:
+        win.showMaximized()
+        QTimer.singleShot(1200, lambda: backend.request(city))
+        QTimer.singleShot(6000, lambda: QMetaObject.invokeMethod(
+            win, "grabRequested", Qt.ConnectionType.DirectConnection, Q_ARG(str, grab_real)))
+        QTimer.singleShot(8200, app.quit)
+        return app.exec()
 
     if not out:
         # 真实窗口：启动直接最大化（无边框窗口原生任务栏样式修复：最小化恢复 / 任务栏点击）
@@ -363,7 +450,10 @@ def main() -> int:
             return 0
 
         _install_language_switch(backend, holder, icon_path)
+        if os.environ.get("WEATHER_PROFILE"):
+            _install_diag(backend, win)
         win.showMaximized()
+        _prof("show")
         QTimer.singleShot(0, lambda: _fix_win32_window(win))
         return app.exec()
 
@@ -403,8 +493,14 @@ def main() -> int:
         try:
             if os.path.exists(out):
                 os.remove(out)
-            QMetaObject.invokeMethod(win, "grabRequested", Qt.ConnectionType.DirectConnection,
-                                     Q_ARG(str, out))
+            if "--grab-at" in sys.argv:
+                yy = int(sys.argv[sys.argv.index("--grab-at") + 1])
+                QMetaObject.invokeMethod(win, "grabAtRequested", Qt.ConnectionType.DirectConnection,
+                                         Q_ARG(str, out), Q_ARG(int, yy))
+            else:
+                sig = "grabFullRequested" if "--grab-full" in sys.argv else "grabRequested"
+                QMetaObject.invokeMethod(win, sig, Qt.ConnectionType.DirectConnection,
+                                         Q_ARG(str, out))
             for _ in range(500):
                 app.processEvents()
                 if os.path.exists(out):

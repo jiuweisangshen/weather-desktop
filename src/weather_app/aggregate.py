@@ -213,7 +213,7 @@ def build(loc: dict, res: dict, cfg: dict, fallback_used: str = None,
     # 风向：中国天气网中文风向优先，缺失时用 Open-Meteo 换算（备用模式用 wttr.in）
     wind_dir_txt = (cc_now.get("wind_dir")
                     or (cur_w.get("winddir16Point") if not cur_main else "")
-                    or wmo.wind_dir_text(_f(cur_main.get("wind_direction_10m")))
+                    or wmo.wind_dir_text(_f(cur_main.get("wind_direction_10m"))))
     gust_raw = cur_main.get("wind_gusts_10m")
     if gust_raw is None and not cur_main:
         gust_raw = cur_w.get("WindGustKmph")
@@ -377,7 +377,7 @@ def build(loc: dict, res: dict, cfg: dict, fallback_used: str = None,
     hourly = []
     for i in range(start, min(start + 48, len(h_times))):
         t = h_times[i]
-        uv_v, vis_v2 = uv_map.get(t, (None, None))
+        uv_v, vis_v = uv_map.get(t, (None, None))
         hc = h_keys["weather_code"][i] if i < len(h_keys["weather_code"]) and h_keys["weather_code"][i] is not None else 0
         hd = h_keys["is_day"][i] if i < len(h_keys["is_day"]) else 1
         is_day_h = hd == 1
@@ -396,7 +396,7 @@ def build(loc: dict, res: dict, cfg: dict, fallback_used: str = None,
             "wind_dir_deg": _r(wind_deg, 0),
             "precip": _r(h_keys["precipitation"][i], 1) if i < len(h_keys["precipitation"]) else None,
             "prob": int(h_keys["precipitation_probability"][i]) if i < len(h_keys["precipitation_probability"]) and h_keys["precipitation_probability"][i] is not None else 0,
-            "uv": _r(uv_v, 1), "vis": _r(vis_v2 / 1000.0 if vis_v2 is not None else None, 1),
+            "uv": _r(uv_v, 1), "vis": _r(vis_v / 1000.0 if vis_v is not None else None, 1),
         })
 
     # 主源缺失时用 wttr.in 的 3 小时粒度补全逐小时（最多 48 条，跳过今天已过去的时段）
