@@ -1,126 +1,150 @@
-# 天气 · Weather Desktop
+# 天气 · 多源天气分析（Windows EXE）
 
-多源聚合的 Windows 天气桌面程序。程序同时拉取多个公开天气接口，加权汇总给出更稳的当前温度与预报，界面用 PySide6 + QML 做成苹果式的「液态玻璃」风格：写实天空实景背景、玻璃卡片、鼠标跟随高光、平滑过渡，并支持**简体中文 / 繁體中文 / English** 三语实时切换。
+一款本地 Windows 天气桌面软件：同时拉取多个天气数据源，加权汇总后给出“较为准确”的温度与天气信息，以苹果式“液态玻璃”圆角界面呈现。
 
-> 本项目由 **豆包（Doubao）、DeepSeek、腾讯混元、通义千问** 共同完成：豆包负责整体架构、后端、QML 界面与整合交付；DeepSeek 负责代码审查、地理编码与 AQI 补丁、稳定性修复；腾讯混元参与交互流程与产品化建议；通义千问负责液态玻璃视觉规范与界面文案。
+- **程序**：`dist\天气\天气.exe`（文件夹版，双击即用，无需安装）
+- **开发**：Python 3.14.8（venv：`F:\weather\.venv`）+ PySide6 6.12 + QML
 
-## 怎么下载
+---
 
-仓库不提供现成安装包（约 120 MB，未随仓库发布），可下载的是**源码 + 资源包**：
+## 一、功能一览
 
-1. 点页面右上绿色的 **`< > Code`** 按钮 → 弹出菜单里点 **Download ZIP**（下的是全部源码）；
-2. 回到仓库根目录，点 **`assets.zip`** → 页面右上 **Download**（下的是图标与背景图，约 6 MB）；
-3. 两个包解压到同一个文件夹：`Expand-Archive .\assets.zip -DestinationPath . -Force`，就会得到 `assets/` 目录，目录结构与 `天气.spec` 一致。
-4. 再看下面「开发运行」三条命令，用 Python 启动 `src/weather_app/main.py`。
+| 模块 | 内容 |
+|---|---|
+| 基础信息 | 所查地区（名称/省级/国家 + 坐标）、当前温度、体感温度、高低温 |
+| 当日详情 | 当日最高/最低温度、天气状况（多云/雨/雪…）、空气污染程度（中国 AQI） |
+| 15 天预报 | 每日天气状况、温度区间条、降水概率、日出/日落 |
+| 逐小时详情 | 每 48 小时：天气状况、体感温度、紫外线指数、风力/阵风/风向、日出日落、降水量（mm）、能见度、湿度、气压 |
+| 数据来源 | 界面底部常驻数据源名称与官方链接（点击直达），并标注“已启用/未启用” |
 
-> 想直接双击安装而不用 Python：需要本地打包或在 Releases 页下载（若后续上传）；也可用 `天气.spec` 自行 PyInstaller 打包。
+界面支持：搜索任意城市（中文/英文/经纬度）、**窗口自由缩放与最大化**（拖拽四边/四角，或双击标题栏、点击右上角最大化按钮；最小宽度 1160px）、**深浅色双主题切换**（右上角太阳/月亮按钮，一键切换并自动记忆，重启后保持）、**天气实景动态背景**（深色主题下背景随当前天气实时切换：晴/多云/阴/雨/雪/雾/雷/夜空 8 种写实天空，平滑淡入）、悬停顶部按钮显示功能说明气泡、无卡顿滚动与自然过渡动画、右下角窗口控制（最小化/最大化/关闭）。
 
-## 功能
+---
 
-- **多源加权**：Open-Meteo、中国天气网、GFS、ECMWF、wttr.in、和风天气（可选）并行取数，缺失源自动归一化，偏离均值过大的源自动剔除
-- **当前 + 逐小时 + 15 天**：温度、体感、湿度、气压、能见度、风向风力、阵风、紫外线、降水、日出日落
-- **空气质量**：大陆城市优先中国天气网官方国标 AQI，缺失时按 HJ 633-2012 由模型浓度换算并标注口径
-- **气象预警**：中国天气网全国预警列表为主源，中央气象台兜底；蓝/黄/橙/红四级按稳定 code 着色
-- **月相**：按经纬度计算月相、照射比例、月龄、月出月落
-- **液态玻璃界面**：实景天空背景随时段与天气切换，玻璃卡片可拖动互换位置，深/浅双主题
-- **三语界面**：设置面板内一键切换 简体中文 / 繁體中文 / English，切换后界面即时重建生效
-- **单实例**：重复启动只会唤起已有窗口，不会开出第二个
+## 二、数据源与聚合算法
 
-## 三语实现
+### 数据源（全部免费，除和风外无需注册）
 
-不依赖 Qt Linguist 的 `.ts/.qm` 编译链，而是「简体原文即键」的自建词典：
+| 数据源 | 用途 | 链接 | 状态 |
+|---|---|---|---|
+| Open-Meteo（best_match） | 主预报：当前/逐小时/15 天 | https://open-meteo.com/ | 已启用 |
+| 中国天气网 | 国内官方实测：国标 AQI、实况温度/湿度/气压/能见度/风 | http://www.weather.com.cn/ | 已启用（大陆城市） |
+| Open-Meteo 单模型 GFS | 当前温度交叉校验（模式源，权重已降） | https://open-meteo.com/ | 已启用 |
+| Open-Meteo 单模型 ECMWF IFS | 当前温度交叉校验（模式源，权重已降） | https://open-meteo.com/ | 已启用 |
+| Open-Meteo 空气质量 API | 空气污染参考（模型浓度，仅官方缺失时使用） | https://open-meteo.com/en/docs/air-quality-api | 已启用 |
+| wttr.in | 交叉校验（WorldWeatherOnline 派生数据） | https://wttr.in/ | 已启用 |
+| 和风天气 QWeather | 可选：在 `config.json` 填入免费 Key 后启用 | https://dev.qweather.com/ | 默认关闭 |
+| 墨迹天气 | 参考站点（无公开 API，仅展示参考） | https://www.moji.com/ | 仅参考 |
+| ip-api.com | IP 自动定位 | https://ip-api.com/ | 自动定位时使用 |
+
+### 温度聚合算法
+
+“当前温度”不是单一来源，而是多源加权平均。**实测结论**：地面实测源（中国天气网 / wttr.in / 和风）彼此差异小、更可靠；模式源（GFS / ECMWF）更分散，权重已降低。默认权重：
 
 ```
-src/weather_app/i18n.py          # 语言常量、词典加载、tr()、localize()
-src/weather_app/i18n/strings.json  # zh-TW 与 en 两份译文（约 300 条）
+open-meteo 0.30 · chinacom(中国天气网) 0.20 · wttr.in 0.20 · gfs 0.10 · ecmwf 0.10 · qweather 0.10
 ```
 
-- QML 侧所有文案写成 `tr("简体原文")`，由 Python 词典翻译；
-- 后端数据（天气描述、AQI/UV 等级、风向、预警级别与类型、数据源名、状态提示）在交给界面前用 `localize()` 递归翻译，`code/id/icon/unit` 等标识字段原样保留；
-- 语言切换由 Python 销毁并重建 QML 引擎完成，避免逐条重翻译与旧绑定残留；
-- 数据源返回的模板化长句带 `_note_tpl` 参数，缓存里存模板而不是成品句子，切语言不会出现旧语言残留。
+- 某源请求失败时自动剔除并对剩余源重新归一化（界面底部显示实际参与源与占比）。
+- **离群剔除**：参与源多于 2 个且某源偏离加权均值超过 2.5°C 时，自动剔除最远源后重算，避免模式源拖偏。
+- 各源温差较大（>1.5°C）时界面提示“多源温差 X.X°C，已按加权平均”。
+- 逐日最高/最低温度同样多源加权（ECMWF / wttr.in / 和风参与）。
 
-## 数据源
+### 空气污染口径说明（裁决结论）
 
-| 数据源 | 用途 | 状态 |
-|---|---|---|
-| Open-Meteo（best_match） | 主预报：当前 / 逐小时 / 15 天 | 启用 |
-| 中国天气网 | 国内官方实测（实况、国标 AQI）、全国预警列表 | 启用（大陆城市） |
-| Open-Meteo GFS / ECMWF | 当前温度交叉校验（模式源，权重已降） | 启用 |
-| Open-Meteo Air Quality | 空气污染参考（模型浓度，官方缺失时使用） | 启用 |
-| wttr.in | 交叉校验（WorldWeatherOnline 派生） | 启用 |
-| 和风天气 QWeather | 可选，填 Key 后启用 | 默认关闭 |
-| ip-api.com | IP 自动定位 | 自动定位时使用 |
+- **大陆城市**：优先显示**中国天气网官方国标 AQI**（国家环境监测实时数据），界面标注“国标（中国天气网官方实时监测）”。
+- **国外城市/官方缺失**：回退为按中国 HJ 633-2012 标准由 Open-Meteo 模型浓度（PM2.5/PM10 小时值）换算，界面标注“换算值·小时值参考”。
+- 实测表明 Open-Meteo 模型浓度可能明显高于官方监测（如北京模型 PM2.5≈296 vs 官方 AQI 120），因此官方数据优先；PM2.5/PM10 浓度仍展示 Open-Meteo 模型值（标注 μg/m³，仅供参考）。
 
-聚合规则：默认权重 open-meteo 0.28 / 中国天气网 0.24 / wttr.in 0.22 / 和风 0.12 / GFS 0.07 / ECMWF 0.07；参与源多于 2 个且某源偏离加权均值超过 2.5°C 时剔除最远源后重算。
+---
 
-## 运行环境
+## 三、使用说明
 
-- Windows 10/11 x64
-- Python 3.14（开发环境），PySide6 6.12
-- 依赖见 `requirements.txt`
+1. 双击 `dist\天气\天气.exe` 运行（首次启动会在程序目录生成 `config.json` 模板）。
+2. 顶部搜索框输入城市（如 `北京`、`London`、`纽约`、`39.9,116.4`），回车查询。
+3. 未输入城市时：优先使用 `config.json` 的 `default_city`，否则 IP 自动定位，失败兜底北京。
+4. 底部点击数据源名称可打开对应官方链接。
 
-## 开发运行
+### config.json 可选配置（EXE 同目录）
+
+```json
+{
+  "qweather_key": "",        // 和风天气免费 Key（https://dev.qweather.com 注册），填入后自动启用和风数据源
+  "default_city": "",        // 留空 = 自动定位；填写如 "北京"
+  "cache_minutes": 10,       // 本地缓存时长（分钟），与 10 分钟自动刷新对齐
+  "weights": {               // 当前温度聚合权重（缺失源自动归一化）
+    "open-meteo": 0.30,
+    "chinacom": 0.20,
+    "wttr.in": 0.20,
+    "gfs": 0.10,
+    "ecmwf": 0.10,
+    "qweather": 0.10
+  }
+}
+```
+
+> 数据刷新策略：启动时先读取未过期缓存立即上屏（秒开），后台线程强制拉取最新数据覆盖；此后每 10 分钟自动刷新当前城市。首次运行无缓存时直接拉取最新数据。
+
+---
+
+## 四、目录结构（F:\weather）
+
+```
+F:\weather
+├── dist\天气\天气.exe   ← 最终交付程序（onedir 文件夹版，启动快）
+├── src\weather_app\
+│   ├── main.py               程序入口（QML 加载 + 截图验证模式）
+│   ├── app.py                Qt 桥（请求/信号/链接 + 缓存先行 + 10 分钟自动刷新）
+│   ├── fetch.py              取数编排（8 路线程池并行）
+│   ├── geo.py                地理编码（别名表 + 可信度排序 + 兜底）
+│   ├── aggregate.py          多源加权聚合
+│   ├── aqi_cn.py             中国 AQI（HJ 633-2012）计算
+│   ├── config.py / cache.py / wmo.py
+│   ├── sources\              open_meteo.py / wttrin.py / qweather.py / chinacom.py / base.py
+│   └── ui\                   main.qml + GlassCard/WeatherIcon/MetricTile/HourlyTile/DailyRow/TipBubble/
+│                              SkyPreview（动态实景天空）/ RainDrops（雨滴动画）.qml
+├── assets\
+│   ├── icons\svg\            39 个矢量图标源（可分层二次编辑）
+│   ├── icons\png\            38 个 256px 渲染图标
+│   ├── appicon\              app_icon.ico（16~256 多尺寸）/ app_icon_1024.png
+│   └── ui\                   aurora_0/1.png 极光渐变背景
+├── team\                     协作 Agent 产出（qwen 视觉规范 / deepseek 审查与补丁）
+├── 工作汇报\                 定期进度汇报
+├── 分工合作.txt / 分工说明.md  多 Agent 分工说明
+├── config.json              用户配置（首次运行自动生成）
+└── README.md
+```
+
+---
+
+## 五、开发 / 重新构建
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python.exe src\weather_app\main.py
+# 环境：Python 3.14.8 venv 已包含 PySide6 6.12.0 / PyInstaller 6.22.3 / requests / Pillow
+
+# 开发运行
+F:\weather\.venv\Scripts\python.exe F:\weather\src\weather_app\main.py
+
+# 离屏截图验证（配合 QT_QPA_PLATFORM=offscreen）
+F:\weather\.venv\Scripts\python.exe F:\weather\build\dbg_qml.py
+
+# 重新打包（onedir 文件夹版，启动快；如需单文件版改 --onefile）
+Set-Location F:\weather
+F:\weather\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --onedir --windowed `
+  --name 天气 --icon F:\weather\assets\appicon\app_icon.ico `
+  --paths F:\weather\src `
+  --add-data "F:\weather\src\weather_app\ui;weather_app\ui" `
+  --add-data "F:\weather\assets;assets" `
+  F:\weather\src\weather_app\main.py
 ```
 
-离屏截图自检（不需要桌面 GPU 窗口）：
+> 说明：本软件仅聚合第三方公开天气数据；天气本质多变，展示的“综合温度”为多源加权参考值。所有数据版权归各数据源所有。
 
-```powershell
-$env:QT_QPA_PLATFORM = "offscreen"
-.venv\Scripts\python.exe src\weather_app\main.py --screenshot out.png --city 北京
-```
+---
 
-## 打包
+## 六、多 Agent 协作记录
 
-```powershell
-.venv\Scripts\python.exe -m PyInstaller 天气.spec --distpath dist --workpath build\pyi --noconfirm
-```
-
-安装包（Inno Setup 6/7）：
-
-```powershell
-ISCC.exe installer\天气_install.iss
-```
-
-## 目录结构
-
-```
-src/weather_app/
-├── main.py            入口（QML 加载、单实例、截图验证模式）
-├── app.py             Qt 桥（请求 / 信号 / 设置读写 / 多语言切换）
-├── fetch.py           取数编排（并行 + 硬截止时间 + 缓存）
-├── aggregate.py       多源加权聚合、提示语、预警合并
-├── geo.py             地理编码（别名表 + 区县 + 经纬度）
-├── aqi_cn.py          中国 AQI（HJ 633-2012）
-├── wmo.py             WMO 天气代码、风向、UV 等级
-├── i18n.py            多语言运行时
-├── i18n/strings.json  繁體中文 / English 词典
-├── config.py / cache.py
-├── sources/           open_meteo / chinacom / wttrin / qweather / alarm_nmc
-└── ui/                main.qml + GlassCard / WeatherIcon / MetricTile / HourlyTile /
-                       DailyRow / MoonPhaseCard / SkyPreview / RainDrops / TipBubble
-assets/
-├── icons/svg/         矢量图标源（可再编辑）
-├── icons/png/         渲染后的图标
-├── appicon/           程序图标（多尺寸 ico）
-└── ui/                极光渐变背景
-```
-
-## 资源文件（assets.zip）
-
-图标、程序图标与背景图是二进制文件，以 `assets.zip`（约 6 MB）随仓库提供。下载后解压到仓库根目录：
-
-```powershell
-Expand-Archive .\assets.zip -DestinationPath . -Force
-```
-
-解压后目录为 `assets/icons/png`、`assets/icons/svg`、`assets/appicon`、`assets/ui`，与 `天气.spec` 里的 datas 路径一致，可直接打包。
-
-## 免责声明
-
-本程序仅聚合第三方公开天气数据，展示的「综合温度」为多源加权参考值，不构成任何专业气象结论；数据版权归各数据源所有。
+- **豆包**（本会话）：代码唯一所有者/整合者；后端、QML 界面、图标、打包与交付。
+- **千问**：液态玻璃视觉规范、界面文案设计、参考图（`team\qwen\`）。
+- **DeepSeek**（Opencode 调用的 DeepSeek）：后端审查报告（5 个 P1 全部合入）、地理编码补丁、中国 AQI 补丁、QML 参考组件、打包清单（`team\deepseek\`）。
+- 协作分工详见 `分工合作.txt` 与 `分工说明.md`；进度见 `工作汇报\`。

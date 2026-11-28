@@ -1,13 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 在仓库根目录执行：python -m PyInstaller 天气.spec --distpath dist --workpath build\pyi --noconfirm
+
 
 a = Analysis(
-    ['src/weather_app/main.py'],
-    pathex=['src'],
+    ['F:/weather/src/weather_app/main.py'],
+    pathex=['F:/weather/src'],
     binaries=[],
-    datas=[('src/weather_app/ui', 'weather_app/ui'),
-           ('src/weather_app/i18n', 'weather_app/i18n'),
-           ('assets', 'assets')],
+    datas=[('F:/weather/src/weather_app/ui', 'weather_app/ui'),
+           ('F:/weather/src/weather_app/i18n', 'weather_app/i18n'),
+           ('F:/weather/assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -34,7 +34,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets/appicon/app_icon.ico'],
+    icon=['F:/weather/assets/appicon/app_icon.ico'],
 )
 coll = COLLECT(
     exe,
