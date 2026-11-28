@@ -15,6 +15,10 @@ Window {
     title: appTitle
 
     property var wd: ({})
+    // 逐小时 / 15 天单独持有：数据到达时先让主卡、指标卡上屏，列表晚 60ms 再补，
+    // 避免"一次 wd 赋值 = 整页重排"卡掉一秒。
+    property var hourlyArr: []
+    property var dailyArr: []
     property bool loading: false
     property bool hasData: false       // 是否已有可显示数据（缓存或网络）
     property bool settingsOpen: false  // 设置面板是否打开（第二层）
@@ -31,6 +35,57 @@ Window {
     property Item glassFollow: null
     property bool glassLive: false
 
+    // 全局鼠标光源：所有玻璃共用这一个光点，避免每块卡各算各的光
+    property vector2d glassMousePos: Qt.vector2d(-1000, -1000)  // bgCapture 坐标系
+    property bool glassMouseActive: false
+    property real lightBlend: 0   // 0=太阳光，1=鼠标光（Behavior 平滑过渡）
+    // 太阳光 → 鼠标光用较长的缓出，避免光斑“啪”地跳出来
+    Behavior on lightBlend { NumberAnimation { duration: 360; easing.type: Easing.OutCubic } }
+    function updateGlassMouse(pos) {
+        glassMousePos = pos
+        glassMouseActive = true
+        glassMouseRelease.stop()
+        lightBlend = (mouseFollow !== false) ? 1 : 0
+    }
+    // 指针离开玻璃/窗口后稍等再淡出：跨卡片、跨缝隙时不会闪一下
+    function scheduleGlassMouseRelease() {
+        if (glassMouseActive)
+            glassMouseRelease.restart()
+    }
+    Timer {
+        id: glassMouseRelease
+        interval: 260
+        repeat: false
+        onTriggered: {
+            glassMouseActive = false
+            lightBlend = 0
+        }
+    }
+    // 首帧渲染完再启用玻璃：启动时先画出基础层（渐变+实景图+卡片兜底），
+    // 避免第一帧就编译 22 张卡的着色器、抓全屏纹理，把首屏时间拖到 3 秒以上。
+    property bool glassReady: false
+    // 第二档：1.9s 后放行屏幕外卡片的玻璃，把 20+ 个着色器的创建拆成两批
+    property bool glassReadyAll: false
+    Timer {
+        id: glassWarmup
+        interval: 900
+        repeat: false
+        onTriggered: {
+            root.glassReady = true
+            root.touchGlass(360)
+            glassWarmupAll.start()
+        }
+    }
+    Timer {
+        id: glassWarmupAll
+        interval: 1000
+        repeat: false
+        onTriggered: {
+            root.glassReadyAll = true
+            root.touchGlass(80)
+        }
+    }
+
     // 换图 / 改主题 / 背景动画 / 改窗口尺寸后，短暂让背景纹理跟随重抓
     // 多语言：界面里的文案统一写成 tr("简体原文")，由 Python 侧词典翻译；
     // 切换语言时 Python 会重建整个界面，无需在此处理重翻译。
@@ -38,11 +93,18 @@ Window {
         try { return backend.translate(text) } catch (e) { return text }
     }
 
-    function touchGlass() {
+    // holdMs：背景连续变化的时长（默认 1400ms）。首次出玻璃时用短时长，
+    // 避免第一张玻璃纹理就连续抓取 1.4 秒全屏，把首屏再拖慢一拍。
+    function touchGlass(holdMs) {
         if (!root.glassTexture)
+            return
+        if (typeof perfGlassLive !== "undefined" && !perfGlassLive)
+            return
+        if (!root.glassReady)
             return
         root.glassTexture.scheduleUpdate()
         root.glassLive = true
+        glassHold.interval = holdMs || 400
         glassHold.restart()
     }
 
@@ -53,8 +115,10 @@ Window {
         onTriggered: root.glassLive = false
     }
 
-    // ===== 太阳高度角（背景色温层随真实太阳位置实时变化） =====
+    // ===== 太阳高度角 / 方位（高光与阴影的实时光源方向） =====
     property real solarElev: 0
+    property vector2d sunDir: Qt.vector2d(-0.6, -0.8)  // 屏幕空间光源方向（指向光源）
+    property real sunLevel: 1.0                       // 太阳光有效强度 0~1
     readonly property color skyTintColor: {
         if (root.light) return "#00000000"
         var e = root.solarElev
@@ -158,12 +222,17 @@ Window {
         searchField.focus = false
         root.touchGlass()
         if (root.glassEdit) {
-            root.showToast(tr("已进入玻璃位置编辑：拖动卡片互换位置"), "#D91E6FD9", 3200)
+            // 编辑时锁住内容区：禁止上下滑动/惯性滚动，避免拖动卡片时页面跟着跑
+            content.cancelFlick()
+            root.clearGlassSwapHighlight()
+            root.captureGlassBases()
+            root.showToast(tr("已进入玻璃位置编辑：拖动小卡片互换位置"), "#D91E6FD9", 3200)
         } else {
             for (var i = 0; i < root.glassCards.length; i++) {
                 root.glassCards[i].previewDX = 0
                 root.glassCards[i].previewDY = 0
                 root.glassCards[i].swapTarget = null
+                root.glassCards[i].swapHighlight = false
             }
         }
     }
@@ -237,11 +306,12 @@ Window {
             c.editDX = 0
             c.editDY = 0
             c.swapTarget = null
+            c.swapHighlight = false
         }
         root.showToast(tr("已恢复玻璃卡片的默认位置"), "#D910B981", 2400)
     }
 
-    // ===== iOS 风格位置互换：拖一张卡靠近另一张时，另一张平滑让位并交换 =====
+    // ===== iOS 风格槽位互换：拖动时其他卡不动，松手后两张卡平滑交换槽位 =====
     property var glassCards: []
     function registerGlassCard(card) {
         if (card && card.layoutKey && root.glassCards.indexOf(card) < 0)
@@ -252,10 +322,12 @@ Window {
         var p = c.mapToItem(bgCapture, c.width / 2, c.height / 2)
         return Qt.point(p.x, p.y)
     }
+    // 布局基准中心：从父级坐标映射，刻意绕开卡片自身的 Translate/scale，
+    // 这样即使上一轮交换动画还没结束，基准也不会被动画中的位置污染。
     function glassBaseCenter(c) {
-        var p = glassVisualCenter(c)
-        return Qt.point(p.x - c.editDX - c.previewDX,
-                        p.y - c.editDY - c.previewDY)
+        if (!c || !c.parent || !bgCapture) return Qt.point(0, 0)
+        var p = c.parent.mapToItem(bgCapture, c.x + c.width / 2, c.y + c.height / 2)
+        return Qt.point(p.x, p.y)
     }
     function glassOverlap(a, b) {
         var ca = glassVisualCenter(a)
@@ -263,34 +335,64 @@ Window {
         return Math.abs(ca.x - cb.x) < (a.width + b.width) * 0.50 &&
                Math.abs(ca.y - cb.y) < (a.height + b.height) * 0.50
     }
-    // 只在松手时判定目标：8 个小卡槽位里离拖动卡最近的那一个。
-    // 拖动过程中不让其他卡片移动，彻底避免闪烁与连锁错位。
+    // iOS 式槽位判定：拖动中实时找离指针最近的槽位（含自己的起始槽位）。
+    // 拖到自己槽位附近 → 不交换；拖到别的卡上 → 高亮该卡，松手后两张卡互换。
+    // 其他卡片全程不动，彻底避免闪烁与连锁错位。
     function findGlassSwapTarget(dragged) {
-        dragged.swapTarget = null
         if (!dragged) return
+        dragged.swapTarget = null
         var best = null
         var bestD = 1e12
         var dc = glassVisualCenter(dragged)
         for (var i = 0; i < root.glassCards.length; i++) {
             var o = root.glassCards[i]
-            if (o === dragged || !o.layoutKey || !o.visible) continue
+            if (!o.layoutKey || !o.visible) continue
             if (o.parent !== dragged.parent) continue
             if (Math.abs(o.width - dragged.width) > 40 ||
                     Math.abs(o.height - dragged.height) > 40) continue
-            var oc = o.baseVisualReady
+            var oc
+            if (o === dragged) {
+                // 自己的起始槽位：按下时的视觉中心（不是布局基准，可能已被上次交换偏移）
+                oc = dragged.dragStartVisual
+                if (oc.x === 0 && oc.y === 0) {
+                    oc = dragged.baseVisualReady
+                         ? Qt.point(dragged.baseVisual.x + dragged.dragStartOffset.x,
+                                    dragged.baseVisual.y + dragged.dragStartOffset.y)
+                         : glassVisualCenter(o)
+                }
+            } else {
+                oc = o.baseVisualReady
                      ? Qt.point(o.baseVisual.x + o.editDX, o.baseVisual.y + o.editDY)
                      : glassVisualCenter(o)
+            }
             var dx = oc.x - dc.x
             var dy = oc.y - dc.y
-            // 目标必须在拖动卡附近（约 1.5 个卡宽以内）
-            if (Math.abs(dx) > dragged.width * 1.5 || Math.abs(dy) > dragged.height * 1.5)
-                continue
             var d = dx * dx + dy * dy
             if (d < bestD) { bestD = d; best = o }
         }
-        if (best) {
+        if (best && best !== dragged) {
             dragged.swapTarget = best
             dragged.swapTargetBase = best.baseVisualReady ? best.baseVisual : glassBaseCenter(best)
+        }
+        // 只高亮最近槽位，其他卡片保持原位；同一目标重复赋值不会触发重绘
+        for (var j = 0; j < root.glassCards.length; j++) {
+            var c = root.glassCards[j]
+            c.swapHighlight = (c === dragged.swapTarget)
+        }
+    }
+    function clearGlassSwapHighlight() {
+        for (var i = 0; i < root.glassCards.length; i++) {
+            root.glassCards[i].swapHighlight = false
+            root.glassCards[i].swapTarget = null
+        }
+    }
+    // 编辑开始/每次按下时刷新所有卡的布局基准：中途滚动过页面也能准确互换
+    function captureGlassBases() {
+        for (var i = 0; i < root.glassCards.length; i++) {
+            var c = root.glassCards[i]
+            if (!c || c.dragging) continue
+            c.baseVisual = glassBaseCenter(c)
+            c.baseVisualReady = true
         }
     }
     function commitGlassSwap(dragged) {
@@ -307,6 +409,7 @@ Window {
         t.previewDX = 0
         t.previewDY = 0
         dragged.swapTarget = null
+        root.clearGlassSwapHighlight()
         // 两张卡一次性提交：避免逐张写回时 onGlassLayoutChanged 把另一张重置
         var o = {}
         for (var k in root.glassLayout) o[k] = root.glassLayout[k]
@@ -318,20 +421,15 @@ Window {
         try { backend.saveGlassLayout(JSON.stringify(o)) } catch (e) {}
     }
 
-    // 非编辑状态下持续记录每张卡的“布局基准中心”（不含任何拖动偏移）
+    // 非编辑状态下持续记录每张卡的"布局基准中心"（不含任何拖动偏移）
+    // 1.2s 一轮即可：只在拖动交换时需要基准，平时窗口稳定，不必 600ms 扫一遍。
     Timer {
-        interval: 600
+        interval: 1200
         repeat: true
         running: true
         onTriggered: {
             if (root.glassEdit) return
-            for (var i = 0; i < root.glassCards.length; i++) {
-                var c = root.glassCards[i]
-                if (!c || c.previewDX !== 0 || c.previewDY !== 0 || c.dragging) continue
-                var vc = glassVisualCenter(c)
-                c.baseVisual = Qt.point(vc.x - c.editDX, vc.y - c.editDY)
-                c.baseVisualReady = true
-            }
+            root.captureGlassBases()
         }
     }
 
@@ -355,6 +453,18 @@ Window {
         onTriggered: backend.request("")
     }
 
+    // 列表延后填充：主卡先上屏，逐小时 / 15 天再补（详见 hourlyArr 注释）
+    Timer {
+        id: listFillTimer
+        interval: 60
+        repeat: false
+        onTriggered: {
+            var d = root.wd
+            root.hourlyArr = (d && d.hourly) ? d.hourly : []
+            root.dailyArr = (d && d.daily) ? d.daily : []
+        }
+    }
+
     // 回到顶部：从当前位置平滑过渡到顶部，不做瞬移
     NumberAnimation {
         id: scrollTopAnim
@@ -375,6 +485,22 @@ Window {
         border.width: root.maximized ? 0 : 1
         border.color: root.tChromeBd
 
+        // 全窗口鼠标跟踪：卡片缝隙、标题栏等没有 MouseArea 的地方也能更新光点。
+        // passive handler，不抢卡片/按钮的鼠标事件。
+        HoverHandler {
+            id: glassHover
+            blocking: false
+            onPointChanged: {
+                if (hovered && root.mouseFollow !== false) {
+                    root.updateGlassMouse(Qt.vector2d(point.position.x, point.position.y))
+                }
+            }
+            onHoveredChanged: {
+                if (!hovered)
+                    root.scheduleGlassMouseRelease()
+            }
+        }
+
         // ================= 背景捕获层（玻璃卡片只抓这一层，不把前景内容折射进去） =================
         Item {
             id: bgCapture
@@ -392,12 +518,14 @@ Window {
             }
 
             // ---------- 天气实景背景（深色主题：随当前天气状况切换，苹果天气风格；浅色主题隐藏） ----------
+            // 异步解码：启动时先出渐变底，JPEG 在解码线程里完成后再淡入，首帧不再等图片
             Image {
                 id: bgImage
                 anchors.fill: parent
                 source: "file:///" + res.replace(/\\/g, "/") + "/ui/sky/sky_clear.jpg"
                 fillMode: Image.PreserveAspectCrop
                 smooth: true
+                asynchronous: true
                 opacity: 0
                 visible: !root.light
                 onStatusChanged: {
@@ -414,6 +542,8 @@ Window {
                 to: 1
                 duration: 900
                 easing.type: Easing.InOutQuad
+                // 淡入结束再抓一帧：玻璃里背景跟着更新，但不用整段 900ms 都连续抓
+                onRunningChanged: if (!running) root.touchGlass(60)
             }
 
             // ---------- 太阳高度色温层（随真实太阳高度角连续变化，深色主题） ----------
@@ -427,14 +557,15 @@ Window {
             }
         }
 
-        // 整窗背景纹理：1/2 分辨率 + mipmap，轻磨砂；换图/动画/改尺寸时短暂 live
+        // 整窗背景纹理：按 perfTexScale 缩放（1.0 全分辨率最清晰、最费 GPU；0.75 肉眼几乎无差）
         ShaderEffectSource {
             id: bgTex
             z: -10
             sourceItem: bgCapture
             live: root.glassLive
-            textureSize: Qt.size(Math.max(1, Math.ceil(root.width / 2)),
-                                 Math.max(1, Math.ceil(root.height / 2)))
+            textureSize: Qt.size(
+                Math.max(1, Math.ceil(root.width * (typeof perfTexScale !== "undefined" ? perfTexScale : 1.0))),
+                Math.max(1, Math.ceil(root.height * (typeof perfTexScale !== "undefined" ? perfTexScale : 1.0))))
             wrapMode: ShaderEffectSource.ClampToEdge
             smooth: true
             mipmap: true
@@ -850,8 +981,11 @@ Window {
                     Behavior on border.color { ColorAnimation { duration: 180 } }
                     Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
 
-                    // 加载时的呼吸光圈，让"正在刷新"一眼可见
+                    // 加载时的呼吸光圈：改成低频脉冲（每 2.4s 一次 0.9s 渐变）。
+                    // 不用 loops:Infinite 的 60fps 动画——网络慢时 loading 会持续 10~20 秒，
+                    // 满帧重绘会把界面拖到个位数帧率（实测单帧 sync 188ms）。
                     Rectangle {
+                        id: breathe
                         anchors.fill: parent
                         anchors.margins: -4
                         radius: 22
@@ -860,12 +994,22 @@ Window {
                         border.color: "#7DD3FC"
                         opacity: 0
                         visible: root.loading
-                        SequentialAnimation on opacity {
-                            running: root.loading
-                            loops: Animation.Infinite
-                            NumberAnimation { from: 0.10; to: 0.70; duration: 700; easing.type: Easing.InOutQuad }
-                            NumberAnimation { from: 0.70; to: 0.10; duration: 700; easing.type: Easing.InOutQuad }
+                        Connections {
+                            target: root
+                            function onLoadingChanged() { if (!root.loading) breathe.opacity = 0 }
                         }
+                    }
+                    SequentialAnimation {
+                        id: pulseAnim
+                        NumberAnimation { target: breathe; property: "opacity"; from: 0.12; to: 0.70; duration: 420; easing.type: Easing.InOutQuad }
+                        NumberAnimation { target: breathe; property: "opacity"; from: 0.70; to: 0.12; duration: 480; easing.type: Easing.InOutQuad }
+                    }
+                    Timer {
+                        interval: 2400
+                        repeat: true
+                        running: root.loading
+                        triggeredOnStart: true
+                        onTriggered: pulseAnim.restart()
                     }
 
                     Image {
@@ -873,12 +1017,12 @@ Window {
                         anchors.centerIn: parent
                         source: "file:///" + res.replace(/\\/g, "/") + "/icons/svg/" + root.theme + "/refresh.svg"
                         sourceSize: Qt.size(19, 19)
-                        RotationAnimation on rotation {
+                        // 20fps 步进旋转：看起来仍在转，但只有 60fps 的 1/3 重绘量
+                        Timer {
+                            interval: 50
+                            repeat: true
                             running: root.loading
-                            from: 0
-                            to: 360
-                            duration: 900
-                            loops: Animation.Infinite
+                            onTriggered: refreshIcon.rotation = (refreshIcon.rotation + 20) % 360
                         }
                     }
                     TipBubble { text: root.loading ? tr("正在刷新天气数据…") : tr("刷新天气数据"); hovered: parent.hov; theme: root.theme }
@@ -1005,9 +1149,15 @@ Window {
                 boundsBehavior: Flickable.StopAtBounds
                 flickDeceleration: 3600
                 maximumFlickVelocity: 7500
-                interactive: !root.settingsOpen && !root.previewOpen
+                interactive: !root.glassEdit && !root.settingsOpen && !root.previewOpen
                 onMovementStarted: searchField.focus = false
                 onFlickStarted: searchField.focus = false
+
+                // 编辑模式彻底锁住页面：触摸板/滚轮也不能上下滚动
+                WheelHandler {
+                    enabled: root.glassEdit
+                    onWheel: function (wheel) { wheel.accepted = true }
+                }
 
                 Column {
                     id: col
@@ -1485,7 +1635,7 @@ Window {
                                 boundsBehavior: Flickable.StopAtBounds
                                 flickDeceleration: 2800
                                 cacheBuffer: 900
-                                model: wd.hourly ? wd.hourly : []
+                                model: root.hourlyArr
                                 delegate: HourlyTile {
                                     theme: root.theme
                                     item: modelData
@@ -1496,7 +1646,15 @@ Window {
                         }
                     }
 
-                    // ============ 15 天预报 ============
+                    // ============ 15 天预报（滚到附近才实例化：首屏不再一次创建 15 行 200+ 元素） ============
+                    Loader {
+                        width: parent.width
+                        height: item ? item.height : 890
+                        active: content.contentY > 260
+                        sourceComponent: dailyCardComp
+                    }
+                    Component {
+                        id: dailyCardComp
                     GlassCard {
                         theme: root.theme
                         hoverable: false  // 大卡不浮动，但仍参与鼠标跟随
@@ -1527,7 +1685,7 @@ Window {
                             Column {
                                 width: parent.width
                                 Repeater {
-                                    model: wd.daily ? wd.daily.slice(0, 15) : []
+                                    model: root.dailyArr ? root.dailyArr.slice(0, 15) : []
                                     delegate: DailyRow {
                                         theme: root.theme
                                         item: modelData
@@ -1539,6 +1697,7 @@ Window {
                                 }
                             }
                         }
+                    }
                     }
                 }
             }
@@ -1687,7 +1846,7 @@ Window {
                 spacing: 10
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: tr("拖动任意玻璃卡片调整位置")
+                    text: tr("拖动小卡片互换位置")
                     font.pixelSize: 12
                     color: root.tMain
                 }
@@ -2011,6 +2170,29 @@ Window {
         return Math.asin(s) / rad
     }
 
+    // 太阳方位角（正北 0°，顺时针）：用于计算玻璃高光/阴影的方向
+    function solarAzimuthDeg(lat, lon, dt) {
+        var rad = Math.PI / 180
+        var jd = dt.getTime() / 86400000 + 2440587.5
+        var n = jd - 2451545.0
+        var L = (280.460 + 0.9856474 * n) % 360
+        if (L < 0) L += 360
+        var g = (357.528 + 0.9856003 * n) % 360
+        if (g < 0) g += 360
+        var lambda = L + 1.915 * Math.sin(g * rad) + 0.020 * Math.sin(2 * g * rad)
+        var eps = (23.439 - 0.0000004 * n) * rad
+        var dec = Math.asin(Math.sin(eps) * Math.sin(lambda * rad))
+        var B = 360 * (n - 81) / 364 * rad
+        var eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B)
+        var utcH = dt.getUTCHours() + dt.getUTCMinutes() / 60 + dt.getUTCSeconds() / 3600
+        var solarH = utcH + lon / 15 + eot / 60
+        var Ha = (solarH - 12) * 15 * rad
+        var y = -Math.sin(Ha)
+        var x = Math.tan(dec) * Math.cos(lat * rad) - Math.sin(lat) * Math.cos(Ha)
+        var az = Math.atan2(y, x) / rad + 180
+        return (az % 360 + 360) % 360
+    }
+
     // 从当前数据包中取经纬度；优先 location（聚合结果里 meta 通常不带坐标），缺失时回退北京
     function updateSolar() {
         var lat = 39.9042
@@ -2027,7 +2209,21 @@ Window {
             var d = parseFloat(m.lon)
             if (!isNaN(c) && !isNaN(d)) { lat = c; lon = d }
         }
-        root.solarElev = root.solarElevationDeg(lat, lon, new Date())
+        var now = new Date()
+        root.solarElev = root.solarElevationDeg(lat, lon, now)
+        // 方位角映射到屏幕空间：北=上、东=右；低太阳角时光线更水平
+        var az = root.solarAzimuthDeg(lat, lon, now) * Math.PI / 180
+        var horiz = Math.max(0.25, Math.cos(root.solarElev * Math.PI / 180))
+        var sx = Math.sin(az) * horiz
+        var sy = -Math.cos(az) * horiz
+        // 夜间没有太阳，回退到左上冷光；鼠标跟随时会覆盖这个方向
+        if (root.solarElev <= 0) {
+            sx = -0.6
+            sy = -0.8
+        }
+        var len = Math.sqrt(sx * sx + sy * sy) || 1
+        root.sunDir = Qt.vector2d(sx / len, sy / len)
+        root.sunLevel = Math.max(0.25, Math.min(1, (root.solarElev + 8) / 45))
     }
 
     // 回到顶部：从当前位置平滑过渡，不做瞬移
@@ -2107,6 +2303,7 @@ Window {
         function onDataLoaded(d) {
             root.hasData = true
             root.wd = d
+            listFillTimer.restart()
             var asked = root.refreshRequested
             var cacheHit = !!(d.meta && d.meta.cache_hit)
             root.refreshRequested = false
@@ -2138,7 +2335,7 @@ Window {
     Component.onCompleted: {
         // 玻璃采样：滚动跟随 Flickable 内容层（滚动时只更新坐标，不重抓纹理）
         root.glassFollow = content.contentItem
-        Qt.callLater(function () { root.touchGlass() })
+        glassWarmup.start()   // 首帧渲染后再开玻璃（详见 glassReady 注释）
         // 等首帧渲染完再请求；有缓存时 200ms 内即可上屏，后台再拉新数据
         startupTimer.start()
     }

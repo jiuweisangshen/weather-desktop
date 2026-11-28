@@ -25,6 +25,10 @@ Item {
     // 只有带布局标识的卡片（8 个小卡）参与位置互换；大卡片不参与拖动
     readonly property bool draggable: gcard.editMode && gcard.layoutKey !== ""
     property bool dragging: false
+    // 松手后的落位动画期间继续保持置顶，避免两张卡交叉时闪烁
+    property bool settling: false
+    // 拖动时高亮最近的可交换槽位（不移动其他卡片，避免连锁错位）
+    property bool swapHighlight: false
     property real editDX: 0
     property real editDY: 0
     // 位置互换时的临时让位偏移（松手后并入 editDX/editDY）
@@ -66,6 +70,8 @@ Item {
     implicitHeight: 160
 
     readonly property bool lt: gcard.theme === "light"
+    // 主窗口预热完成后才允许创建玻璃着色器（见 main.qml 的 glassReady）
+    readonly property bool glassReady: glassWindowItem ? !!glassWindowItem.glassReady : false
 
     // ---------- 背景纹理与坐标映射（自动取主窗口的统一背景层） ----------
     // 注意：直接在绑定里写 gcard.window 会在窗口挂载前求值为 null 且不再更新，
@@ -101,10 +107,18 @@ Item {
     property bool hovered: false
     property real hoverLevel: hovered ? 1.0 : 0.0
     property bool mouseInside: false
-    property real mouseHoverLevel: (mouseInside && gcard.followEnabled ? 1.0 : 0.0) * (typeof glassWindowItem !== "undefined" && glassWindowItem ? glassWindowItem.hoverBrightness : 1.0)
+    // 鼠标高光强度来自全窗口共享的光源，而不是“鼠标在不在本卡内”
+    property real mouseHoverLevel: (gcard.followEnabled && glassWindowItem
+                                    ? glassWindowItem.lightBlend : 0.0)
+                                   * (glassWindowItem ? glassWindowItem.hoverBrightness : 1.0)
     property real hoverX: width * 0.5
     property real hoverY: height * 0.4
     readonly property vector2d mousePos: Qt.vector2d(hoverX, hoverY)
+
+    // 光源：太阳方位/高度由主界面按时间与经纬度实时计算；鼠标光优先级更高。
+    // lightBlend 用动画过渡，保证从太阳光切到鼠标光（以及切回）都是丝滑的。
+    property vector2d sunDir: glassWindowItem ? glassWindowItem.sunDir : Qt.vector2d(-0.6, -0.8)
+    property real sunLevel: glassWindowItem ? glassWindowItem.sunLevel : 1.0
 
     // ---------- 玻璃光学参数（干净透明优先，背景细节保留） ----------
     property real refraction: 14.0
@@ -115,15 +129,24 @@ Item {
 
     // 悬浮浮动：纯视觉缩放，不占布局、不触发重排
     readonly property bool hoverScaleEnabled: gcard.hoverable && gcard.floatEnabled && gcard.animLevel !== "off"
-    scale: (gcard.hovered && gcard.hoverScaleEnabled) ? 1.03 : 1.0
+    // 拖动时像 iOS 图标一样轻微抬起；松手后回落到 1.0
+    scale: gcard.dragging ? (gcard.animLevel === "off" ? 1.0 : 1.055)
+                          : ((gcard.hovered && gcard.hoverScaleEnabled) ? 1.03 : 1.0)
+    z: (gcard.dragging || gcard.settling) ? 30 : 0
+    Timer {
+        id: settleTimer
+        interval: 260
+        repeat: false
+        onTriggered: gcard.settling = false
+    }
     Behavior on scale {
-        enabled: gcard.animLevel === "full"
-        NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+        enabled: gcard.animLevel !== "off"
+        NumberAnimation {
+            duration: gcard.dragging ? 140 : 200
+            easing.type: Easing.OutCubic
+        }
     }
     Behavior on hoverLevel {
-        NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
-    }
-    Behavior on mouseHoverLevel {
         NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
     }
 
@@ -155,8 +178,9 @@ Item {
     }
 
     // 兜底校正：滚动惯性、布局动画期间的低频重算（只做一次 mapToItem，开销可忽略）
+    // 200ms 一轮：滚动/布局本身已有 x/yChanged 实时触发，这里只是兜底，不必 120ms。
     Timer {
-        interval: 120
+        interval: 200
         repeat: true
         running: gcard.visible && gcard.bgTexture !== null
         onTriggered: gcard.refreshPos()
@@ -210,55 +234,37 @@ Item {
     Connections {
         target: gcard.glassWindowItem
         function onGlassLayoutChanged() { gcard.loadLayout() }
-        function onGlassEditChanged() { gcard.dragging = false; gcard.refreshPos() }
-    }
-
-    // ---------- 柔和外阴影（从卡片底缘开始、左右微扩、垂直渐变渐隐） ----------
-    Repeater {
-        model: [
-            { off: 8,  a: lt ? 0.035 : 0.070, sp: 6 },
-            { off: 16, a: lt ? 0.020 : 0.040, sp: 10 },
-            { off: 26, a: lt ? 0.010 : 0.020, sp: 16 },
-            { off: 38, a: lt ? 0.005 : 0.009, sp: 22 }
-        ]
-        delegate: Rectangle {
-            x: -modelData.sp
-            y: gcard.height - modelData.sp
-            width: gcard.width + modelData.sp * 2
-            height: modelData.off + modelData.sp * 2 + 18
-            radius: gcard.radius + modelData.sp
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: Qt.rgba(0, 0, 0, modelData.a) }
-                GradientStop { position: 0.6; color: Qt.rgba(0, 0, 0, modelData.a * 0.35) }
-                GradientStop { position: 1.0; color: "#00000000" }
-            }
+        function onGlassEditChanged() {
+            gcard.dragging = false
+            gcard.settling = false
+            settleTimer.stop()
+            gcard.swapTarget = null
+            gcard.swapHighlight = false
+            gcard.refreshPos()
         }
     }
 
-    // 玻璃厚度：外圈极淡冷光 + 内缘细亮边，只勾勒边缘，不压暗背景
+    // ---------- 新版阴影：只保留贴底 18px 的冷色接触阴影 ----------
+    // 旧版四层大范围黑影会把夜景背景整体压暗，月亮细节丢失；这里只留极短的一层，
+    // 用边缘高光而不是大面积暗层来让玻璃突出。
     Rectangle {
-        anchors.fill: parent
-        anchors.margins: -1
-        radius: gcard.radius + 1
-        color: "transparent"
-        border.width: 1
-        border.color: gcard.lt ? "#3CFFFFFF" : "#20FFFFFF"
-        z: -1
-    }
-    Rectangle {
-        anchors.fill: parent
-        radius: gcard.radius
-        color: "transparent"
-        border.width: 1
-        border.color: gcard.lt ? "#A6FFFFFF" : "#4DFFFFFF"
-        z: 2
+        x: -4
+        y: gcard.height - 4
+        width: gcard.width + 8
+        height: 18
+        radius: gcard.radius + 4
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: Qt.rgba(0.01, 0.03, 0.08, gcard.lt ? 0.10 : 0.14) }
+            GradientStop { position: 0.45; color: Qt.rgba(0.01, 0.03, 0.08, gcard.lt ? 0.03 : 0.05) }
+            GradientStop { position: 1.0; color: "#00000000" }
+        }
     }
 
     // 背景纹理就绪前的兜底（避免启动瞬间出现全透明卡片）
     Rectangle {
         anchors.fill: parent
         radius: gcard.radius
-        visible: !gcard.bgTexture
+        visible: !gcard.glassReady || !gcard.bgTexture
         color: gcard.lt ? "#1AFFFFFF" : "#14FFFFFF"
         border.width: 1
         border.color: gcard.lt ? "#46FFFFFF" : "#42FFFFFF"
@@ -269,30 +275,42 @@ Item {
         }
     }
 
-    // ---------- 玻璃本体 ----------
-    ShaderEffect {
-        id: glass
+    // ---------- 玻璃本体（延迟到首帧之后再实例化） ----------
+    // 启动时先显示兜底渐变卡，玻璃就绪（主窗口 900ms 预热）后才创建着色器节点，
+    // 避免第一帧就编译 20+ 个 ShaderEffect、把首屏再往后拖。
+    Loader {
+        id: glassLoader
         anchors.fill: parent
-        visible: !!gcard.bgTexture
+        active: gcard.glassReady && !!gcard.bgTexture
+                && (gcard.y < 900 || (glassWindowItem ? !!glassWindowItem.glassReadyAll : true))
+        sourceComponent: Component {
+            ShaderEffect {
+                anchors.fill: parent
 
-        property variant bg: gcard.bgTexture
-        property vector2d winSize: gcard.bgRef
-                                   ? Qt.vector2d(gcard.bgRef.width, gcard.bgRef.height)
-                                   : Qt.vector2d(1, 1)
-        property vector2d cardPos: gcard.cardPos
-        property vector2d cardSize: Qt.vector2d(gcard.width, gcard.height)
-        property real radius: gcard.radius
-        // 鼠标跟随：局部镜面光斑 + 指针侧边缘反光（旧版大范围提亮已移除）
-        property real hover: gcard.mouseHoverLevel
-        property vector2d mouse: gcard.mousePos
-        property real light: gcard.lt ? 1.0 : 0.0
-        property real refract: gcard.refraction
-        property real disperse: gcard.dispersion
-        property vector3d tintRGB: gcard.tintRGB
-        property real tintAlpha: gcard.tintAlpha
-        property real cardScale: gcard.scale
+                property variant bg: gcard.bgTexture
+                property vector2d winSize: gcard.bgRef
+                                           ? Qt.vector2d(gcard.bgRef.width, gcard.bgRef.height)
+                                           : Qt.vector2d(1, 1)
+                property vector2d cardPos: gcard.cardPos
+                property vector2d cardSize: Qt.vector2d(gcard.width, gcard.height)
+                property real radius: gcard.radius
+                // 鼠标跟随：局部镜面光斑 + 指针侧边缘反光（旧版大范围提亮已移除）
+                property real hover: gcard.mouseHoverLevel
+                property real light: gcard.lt ? 1.0 : 0.0
+                property real refract: gcard.refraction
+                property real disperse: gcard.dispersion
+                property vector3d tintRGB: gcard.tintRGB
+                property real tintAlpha: gcard.tintAlpha
+                property real cardScale: gcard.scale
+                // 太阳光方向/强度 + 鼠标光融合系数（鼠标优先级更高）
+                property vector2d sunDir: gcard.sunDir
+                property real sunLevel: gcard.sunLevel
+                property real lightBlend: glassWindowItem ? glassWindowItem.lightBlend : 0
+                property vector2d mouseScreen: glassWindowItem ? glassWindowItem.glassMousePos : Qt.vector2d(-1000, -1000)
 
-        fragmentShader: "glass.frag.qsb"
+                fragmentShader: "glass.frag.qsb"
+            }
+        }
     }
 
     // ---------- 悬停追踪（所有卡片都追踪鼠标位置，用于玻璃高光；hoverable 控制是否缩放） ----------
@@ -305,14 +323,24 @@ Item {
             if (gcard.hoverable) {
                 gcard.hovered = containsMouse
             }
+            if (!containsMouse && glassWindowItem && glassWindowItem.scheduleGlassMouseRelease)
+                glassWindowItem.scheduleGlassMouseRelease()
         }
         onPositionChanged: function (mouse) {
             gcard.hoverX = mouse.x
             gcard.hoverY = mouse.y
+            if (glassWindowItem && glassWindowItem.updateGlassMouse && gcard.bgRef) {
+                var gp = gcard.mapToItem(gcard.bgRef, mouse.x, mouse.y)
+                glassWindowItem.updateGlassMouse(Qt.vector2d(gp.x, gp.y))
+            }
         }
         onEntered: {
             gcard.hoverX = mouseX
             gcard.hoverY = mouseY
+            if (glassWindowItem && glassWindowItem.updateGlassMouse && gcard.bgRef) {
+                var gp = gcard.mapToItem(gcard.bgRef, mouseX, mouseY)
+                glassWindowItem.updateGlassMouse(Qt.vector2d(gp.x, gp.y))
+            }
         }
     }
 
@@ -336,38 +364,57 @@ Item {
         acceptedButtons: Qt.LeftButton
         cursorShape: Qt.SizeAllCursor
         property point startCard: Qt.point(0, 0)
-        property point startMouse: Qt.point(0, 0)
+        // 用场景坐标算位移：卡片自身会跟着鼠标移动，局部 mouse.x 会反过来“追不上”
+        property point startGlobal: Qt.point(0, 0)
         onPressed: function (mouse) {
             startCard = Qt.point(gcard.editDX, gcard.editDY)
-            startMouse = Qt.point(mouse.x, mouse.y)
+            startGlobal = dragArea.mapToItem(null, mouse.x, mouse.y)
             gcard.dragStartOffset = startCard
-            if (glassWindowItem && glassWindowItem.glassVisualCenter) {
+            if (glassWindowItem && glassWindowItem.captureGlassBases)
+                glassWindowItem.captureGlassBases()
+            // 起始槽位 = 布局基准 + 按下前的偏移；用基准算，上一轮动画没结束也不会偏
+            if (gcard.baseVisualReady) {
+                gcard.dragStartVisual = Qt.point(gcard.baseVisual.x + startCard.x,
+                                                 gcard.baseVisual.y + startCard.y)
+            } else if (glassWindowItem && glassWindowItem.glassVisualCenter) {
                 gcard.dragStartVisual = glassWindowItem.glassVisualCenter(gcard)
-                gcard.baseVisual = Qt.point(gcard.dragStartVisual.x - gcard.editDX - gcard.previewDX,
-                                            gcard.dragStartVisual.y - gcard.editDY - gcard.previewDY)
-                gcard.baseVisualReady = true
             }
+            gcard.settling = false
+            settleTimer.stop()
             gcard.dragging = true
             gcard.hovered = false
         }
         onPositionChanged: function (mouse) {
             if (!pressed) return
-            var nx = startCard.x + (mouse.x - startMouse.x)
-            var ny = startCard.y + (mouse.y - startMouse.y)
+            var gp = dragArea.mapToItem(null, mouse.x, mouse.y)
+            var nx = startCard.x + (gp.x - startGlobal.x)
+            var ny = startCard.y + (gp.y - startGlobal.y)
             gcard.editDX = Math.max(-900, Math.min(900, nx))
             gcard.editDY = Math.max(-900, Math.min(900, ny))
-            // 拖动过程中只更新自身与玻璃采样；其他卡片不动，松手时才交换
+            // 拖动过程中只更新自身与玻璃采样；其他卡片不动，只高亮最近槽位
             gcard.refreshPos()
+            if (glassWindowItem && glassWindowItem.findGlassSwapTarget)
+                glassWindowItem.findGlassSwapTarget(gcard)
         }
         onReleased: {
             if (!gcard.dragging) return
             gcard.dragging = false
             if (glassWindowItem && glassWindowItem.findGlassSwapTarget)
                 glassWindowItem.findGlassSwapTarget(gcard)
-            if (glassWindowItem && glassWindowItem.commitGlassSwap)
-                glassWindowItem.commitGlassSwap(gcard)
+            if (gcard.swapTarget) {
+                if (glassWindowItem && glassWindowItem.commitGlassSwap)
+                    glassWindowItem.commitGlassSwap(gcard)
+            } else {
+                // 没落在别的槽位上：平滑回到按下时的槽位，不留下半截偏移
+                gcard.editDX = gcard.dragStartOffset.x
+                gcard.editDY = gcard.dragStartOffset.y
+            }
+            if (glassWindowItem && glassWindowItem.clearGlassSwapHighlight)
+                glassWindowItem.clearGlassSwapHighlight()
             if (gcard.layoutKey && glassWindowItem)
                 glassWindowItem.updateCardLayout(gcard.layoutKey, gcard.editDX, gcard.editDY)
+            gcard.settling = true
+            settleTimer.restart()
             gcard.refreshPos()
         }
     }
@@ -379,5 +426,19 @@ Item {
         border.width: gcard.draggable ? 2 : 0
         border.color: "#7DD3FC"
         visible: gcard.draggable
+    }
+    // 最近可交换槽位的高亮环：只提示目标，不移动目标卡
+    Rectangle {
+        anchors.fill: parent
+        z: 7
+        radius: gcard.radius
+        color: "#1A7DD3FC"
+        border.width: 3
+        border.color: "#A7F3D0"
+        visible: opacity > 0.01
+        opacity: gcard.swapHighlight ? 1.0 : 0.0
+        Behavior on opacity {
+            NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+        }
     }
 }

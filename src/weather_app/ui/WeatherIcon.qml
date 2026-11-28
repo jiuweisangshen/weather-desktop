@@ -16,5 +16,8 @@ Item {
         sourceSize: Qt.size(wic.size * 2, wic.size * 2)
         smooth: true
         antialiasing: true
+        // SVG 栅格化放到加载线程：启动时几十个图标不再逐个卡住首帧
+        asynchronous: true
+        cache: true
     }
 }
